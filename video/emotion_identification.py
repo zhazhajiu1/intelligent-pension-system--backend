@@ -16,8 +16,8 @@ class EmotionRecognition:
         self.predictor = dlib.shape_predictor(predictor_path)
         self.face_rec_model = dlib.face_recognition_model_v1(face_rec_model_path)
 
-        self.emotions = ['happy', 'normal']
-        # self.emotions = ['anger', 'contempt', 'disgust', 'fear', 'happy', 'sadness', 'surprise']
+        self.emotions = ['happy', 'normal', 'surprise']
+        # self.emotions = ['anger', 'contempt', 'disgust', 'fear', 'happy', 'sadness']
 
     def recognize_emotion(self, frame, face):
         shape = self.predictor(frame, face)

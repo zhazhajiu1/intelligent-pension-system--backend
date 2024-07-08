@@ -101,6 +101,7 @@ def register(request):
     Sex = json_param.get('Sex')
     Age = json_param.get('Age')
     Phone = json_param.get('Phone')
+    print(Phone)
 
     if UserRole == '1':
         result = Employee.objects.filter(UserName=UserName)
@@ -123,10 +124,12 @@ def register(request):
     else:
         ImgUrl = json_param.get('ImgUrl')
         result = Volunteer.objects.filter(UserName=UserName)
+        print(result)
         if result.exists():
             return JsonResponse({'code': 20002, 'message': '用户已存在'})
 
         result1 = Volunteer.objects.filter(Phone=Phone)
+        print(result1)
         if result1.exists():
             return JsonResponse({'code': 20003, 'message': '手机号已被注册'})
 
@@ -153,7 +156,7 @@ def userInfo(request):
     else:
         return JsonResponse({'code': 20003, 'message': '无效的 token 或缺少 token'})
 
-    # print(token)
+    print(token)
     # print(result)
     # print(result.get('username'))
     role = getRoleByToken(token)
@@ -369,22 +372,11 @@ def userUpdateInfo(request):
 
 def employeeList(request):
     # print(1111111111111)
-    token = request.META.get("HTTP_AUTHORIZATION")  # 获取 Authorization 头部
-    if token and token.startswith("Bearer "):
-        token = token.split(" ")[1]  # 提取实际的 token 部分
-    else:
-        return JsonResponse({'code': 20003, 'message': '无效的 token 或缺少 token'})
-
     # print(token)
     # print(token)
     # print(result)
     # print(result.get('username'))
-    role = getRoleByToken(token)
     # print(role)
-
-    if role != "admin":
-        return JsonResponse({'code': 20003, 'message': '你没有权限'})
-
     searchName = request.GET.get('UserName')
     searchPhone = request.GET.get('Phone')
 
@@ -575,18 +567,6 @@ def employeeDetailByID(request):
 
 
 def volunteerList(request):
-    token = request.META.get("HTTP_AUTHORIZATION")  # 获取 Authorization 头部
-    if token and token.startswith("Bearer "):
-        token = token.split(" ")[1]  # 提取实际的 token 部分
-    else:
-        return JsonResponse({'code': 20003, 'message': '无效的 token 或缺少 token'})
-    # print(token)
-    # print(result)
-    # print(result.get('username'))
-    role = getRoleByToken(token)
-
-    if role == 'volunteer':
-        return JsonResponse({'code': 20003, 'message': '你没有权限'})
 
     searchName = request.GET.get('UserName')
     searchPhone = request.GET.get('Phone')
@@ -606,7 +586,6 @@ def volunteerList(request):
     volunteer_list = []
     for volunteer in volunteers:
         url = getImgUrl(volunteer.ImgUrl)
-
         volunteer_list.append(
             {
                 'ID': volunteer.ID,
@@ -1047,3 +1026,50 @@ def uploadCloud(request):
     # print(url)
     # print(f'Image URL: {image_url}')
     return JsonResponse({'code': 20000, 'message': '成功上传', 'data': oss_file_name})
+
+
+context = [
+    {"role": "user", "content": "我想咨询一些问题，问题应用场景为养老系统，请你简短回答我后续的问题,不要说多余的话"},
+    {"role": "assistant", "content": "好的，说出您的问题即可，我会用简短的语言试着帮您解答~"}]
+
+
+def chat(request):
+    post_body = request.body
+    json_param = json.loads(post_body.decode())
+    Question = json_param.get('Question')
+    # print(Question)
+
+    # API 地址
+    url = "https://api.chatanywhere.tech/v1/chat/completions"
+
+    user_message = Question
+
+    payload = {
+        "model": "gpt-3.5-turbo",
+        "messages": context + [{"role": "user", "content": user_message}],
+        "temperature": 0.7
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer sk-ebn5Il2cyqaOEohGh6jbKSmODl2hLi0gwyp5ihJLE8QJtzjT"
+    }
+
+    try:
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        message = response.json()
+        reply = message['choices'][0]['message']['content']
+    except requests.RequestException as e:
+        return JsonResponse({'code': 20001, 'message': '错误'})
+    except KeyError as e:
+        return JsonResponse({'code': 20001, 'message': '错误'})
+
+    context.append({"role": "user", "content": user_message})
+    context.append({"role": "assistant", "content": reply})
+    print(reply)
+
+    return JsonResponse({'code': 20000, 'message': '成功获取', 'data': {
+        'Answer': reply
+    }})
+    # return JsonResponse({'code': 20000, 'message': '刘荧真牛逼'})

@@ -9,6 +9,7 @@ import numpy as np
 from deep_sort.utils.parser import get_config
 from deep_sort.deep_sort import DeepSort
 from video.modelsEntity import Intrusion
+from video.sendMessage import send_sms
 
 #阿里云
 # 填写您的Access Key ID和Access Key Secret
@@ -113,6 +114,7 @@ def draw_bboxes(im, bboxes, mask):  # 绘制目标跟踪框，中心点，和入
             bucket.put_object(oss_file_name, io_buf.getvalue())
             intrusion = Intrusion(ImgUrl=oss_file_name)
             intrusion.save()
+            # send_sms("13855732038")
     intrusion_count +=1
 
     return im  # 返回绘制后的图

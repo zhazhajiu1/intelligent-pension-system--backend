@@ -9,6 +9,7 @@ class Emotion(models.Model):
     ElderlyName = models.CharField(max_length=50)
     ImgUrl = models.CharField(max_length=255)
     Created = models.DateTimeField(auto_now_add=True)
+    Type = models.CharField(max_length=50)
 
     def __unicode__(self):
         return u'Emotion:%s' % self.ID
@@ -54,3 +55,13 @@ class Reaction(models.Model):
 
     def __unicode__(self):
         return u'Unknow:%s' % self.ID
+
+
+class Fire(models.Model):
+    objects = None
+    ID = models.AutoField(primary_key=True)
+    ImgUrl = models.CharField(max_length=255)
+    Created = models.DateTimeField(auto_now_add=True)
+
+    def __unicode__(self):
+        return u'Fire:%s' % self.ID

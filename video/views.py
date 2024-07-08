@@ -1,13 +1,12 @@
 from __future__ import unicode_literals
-
 import binascii
 import json
 import os
 import time
 import io
+from threading import Thread, Lock
 
 from django.http import JsonResponse, StreamingHttpResponse
-
 from user.models import Elderly, Volunteer
 from . import redis_connect
 from .emotion_identification import EmotionRecognition
@@ -19,21 +18,25 @@ import dlib
 import numpy as np
 import pickle
 from sklearn import neighbors
-
-from .modelsEntity import Emotion, Fall, Unknow, Intrusion, Reaction
-
+from .modelsEntity import Emotion, Fall, Unknow, Intrusion, Reaction, Fire
 import cv2
 import numpy as np
 import torch
 from models.experimental import attempt_load
-from utils.general import check_img_size, non_max_suppression, scale_coords
-from utils.plots import Annotator, colors
 from utils.augmentations import letterbox
-from utils.torch_utils import select_device
 from pathlib import Path
+from models.common import DetectMultiBackend
+from utils.datasets import IMG_FORMATS, VID_FORMATS, LoadImages, LoadStreams
+from utils.general import (LOGGER, check_file, check_img_size, check_imshow, check_requirements, colorstr,
+                           increment_path, non_max_suppression, print_args, scale_coords1, strip_optimizer, xyxy2xywh)
+from utils.plots import Annotator, colors, save_one_box
+from utils.torch_utils import select_device, time_sync
 import pathlib
 from .detect import Detector  # 调用detect文件的Detector类
 from video import tracker  # 调用修改的tracker文件
+import pyttsx3
+from PIL import Image, ImageDraw, ImageFont
+from video.sendMessage import send_sms
 
 pathlib.PosixPath = pathlib.WindowsPath
 
@@ -61,7 +64,7 @@ DISTANCE_THRESHOLD = 100  # 1米内,判断为交互
 KNOWN_FOCAL_LENGTH = 630.0  # 焦距px
 
 #情绪识别
-model_path2 = 'video/models/emotion_recognition_model.h5'
+model_path2 = 'video/models/emotion_recognition_model(2).h5'
 predictor_path2 = 'video/data_dlib/shape_predictor_68_face_landmarks.dat'
 face_rec_model_path2 = 'video/data_dlib/dlib_face_recognition_resnet_model_v1.dat'
 emotion_recognition = EmotionRecognition(model_path2, predictor_path2, face_rec_model_path2)
@@ -85,6 +88,20 @@ p3x = 0
 p3y = 0
 p4x = 0
 p4y = 0
+
+#人脸采集
+
+speak_lock = Lock()
+facesNum = -1
+
+#火灾检测
+# Initialize YOLOv5 model
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+weights = 'best.pt'  # 使用你的权重文件路径
+imgsz = (640, 640)  # 模型输入图像大小
+model = DetectMultiBackend(weights, device=device)
+stride, names, pt = model.stride, model.names, model.pt
+imgsz = check_img_size(imgsz, s=stride)  # 检查图像大小
 
 
 def draw_mask(im):  # 定义一个函数，用于将鼠标绘制的区域绘制到显示的图片上
@@ -145,6 +162,8 @@ def gen_display(url):
     predictor_path = PREDICTOR_PATH
     threshold = 0.4
     skip_frames = SKIP_FRAMES
+    video_duration = 100  # 录制视频时长，单位秒
+    fps = 20  # 视频帧率
     # 加载训练好的 KNN 模型
     with open(model_path, 'rb') as f:
         knn_clf = pickle.load(f)
@@ -159,6 +178,7 @@ def gen_display(url):
     frame_count = 0  # 帧计数器
     unknow_count = 0
     emotion_count = 0
+
     # 循环读取视频帧
     while camera.isOpened():
         # 读取一帧图像
@@ -181,6 +201,7 @@ def gen_display(url):
                     # is_recognized = max_prob >= threshold
                     x, y, w, h = face.left(), face.top(), face.width(), face.height()
                     if is_recognized:
+
                         label = knn_clf.predict([encoding])[0]
                         identity, person_name = label.split('_')
                         color = (0, 255, 0)  # 绿色框表示识别成功
@@ -188,6 +209,7 @@ def gen_display(url):
                         text = f"{identity}: {person_name}"
                         # 表情识别
                         emotion = emotion_recognition.recognize_emotion(frame, face)
+                        print(emotion)
                         # 在人脸周围绘制矩形框
                         cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
                         # 在人脸上方显示表情标签
@@ -195,27 +217,52 @@ def gen_display(url):
                         # 在人脸下方显示身份标签
                         cv2.putText(frame, text, (x, y + h + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                         emotion_count += 1
-                        if identity == 'elderly' and emotion == 'happy' and(emotion_count == 0 or emotion_count % 10 == 0):
-                            screenshot = frame.copy()
-                            # 获取当前时间
-                            getTime = time.strftime('%H:%M:%S', time.localtime())
-                            # print(getTime)
-                            # 生成截图文件名
-                            filename = 'emotion_{}.png'.format(getTime)
+                        if identity == 'elderly':
+                            if emotion == 'happy' and (
+                                    emotion_count == 0 or emotion_count % 10 == 0):
+                                screenshot = frame.copy()
+                                # 获取当前时间
+                                getTime = time.strftime('%H:%M:%S', time.localtime())
+                                # print(getTime)
+                                # 生成截图文件名
+                                filename = 'emotion_{}.png'.format(getTime)
 
-                            # 将图像写入内存缓冲区
-                            is_success, buffer = cv2.imencode(".png", screenshot)
-                            io_buf = io.BytesIO(buffer)
+                                # 将图像写入内存缓冲区
+                                is_success, buffer = cv2.imencode(".png", screenshot)
+                                io_buf = io.BytesIO(buffer)
 
-                            # 填写上传到 OSS 后的文件名
-                            oss_file_name = 'old-care/emotion/{}'.format(filename)
+                                # 填写上传到 OSS 后的文件名
+                                oss_file_name = 'old-care/emotion/{}'.format(filename)
 
-                            # 上传文件到 OSS
-                            bucket.put_object(oss_file_name, io_buf.getvalue())
-                            emotion1 = Emotion(ElderlyName=person_name,
-                                               ImgUrl=oss_file_name)
-                            emotion1.save()
+                                # 上传文件到 OSS
+                                bucket.put_object(oss_file_name, io_buf.getvalue())
+                                emotion1 = Emotion(ElderlyName=person_name,
+                                                   ImgUrl=oss_file_name,
+                                                   Type='0')
+                                emotion1.save()
+                            elif emotion == 'surprise' and (
+                                    emotion_count == 0 or emotion_count % 10 == 0):
 
+                                screenshot = frame.copy()
+                                # 获取当前时间
+                                getTime = time.strftime('%H:%M:%S', time.localtime())
+                                # print(getTime)
+                                # 生成截图文件名
+                                filename = 'emotion_{}.png'.format(getTime)
+
+                                # 将图像写入内存缓冲区
+                                is_success, buffer = cv2.imencode(".png", screenshot)
+                                io_buf = io.BytesIO(buffer)
+
+                                # 填写上传到 OSS 后的文件名
+                                oss_file_name = 'old-care/emotion/{}'.format(filename)
+
+                                # 上传文件到 OSS
+                                bucket.put_object(oss_file_name, io_buf.getvalue())
+                                emotion1 = Emotion(ElderlyName=person_name,
+                                                   ImgUrl=oss_file_name,
+                                                   Type='1')
+                                emotion1.save()
                     else:
                         color = (0, 0, 255)  # 红色框表示识别失败
                         text = "Unknown"
@@ -225,6 +272,7 @@ def gen_display(url):
                         # 在人脸下方显示身份标签
                         cv2.putText(frame, text, (x, y + h + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
                         unknow_count += 1
+
                         if unknow_count == 0 or unknow_count % 10 == 0:
                             screenshot = frame.copy()
                             # 获取当前时间
@@ -241,6 +289,7 @@ def gen_display(url):
                             bucket.put_object(oss_file_name, io_buf.getvalue())
                             unknow = Unknow(ImgUrl=oss_file_name)
                             unknow.save()
+                            # send_sms("13855732038")
 
                 # 显示结果帧
                 # cv2.imshow('Face Recognition', frame)
@@ -330,6 +379,7 @@ def gen_display2(url):
                             bucket.put_object(oss_file_name, io_buf.getvalue())
                             fall = Fall(ImgUrl=oss_file_name)
                             fall.save()
+                            # send_sms("13855732038")
 
                         # cv2.imwrite('fall_detected.jpg', frame)  # 保存截图
                         fall_timer = 0  # 重置计时器
@@ -362,16 +412,38 @@ def getUrl2(request):
 def emotionList(request):
     searchName = request.GET.get('UserName')
     searchDate = request.GET.get('Date')
+    searchType = request.GET.get('Type')
 
-    if not searchDate and not searchName:
+    if not searchName and not searchDate and not searchType:
         emotions = Emotion.objects.all()
         total = Emotion.objects.count()
-    elif searchDate and searchName:
-        emotions = Emotion.objects.filter(Created__startswith=searchDate, ElderlyName=searchName)
-        total = Emotion.objects.filter(Created__startswith=searchDate, ElderlyName=searchName).count()
-    elif not searchDate and searchName:
+    elif searchName and searchDate and searchType:
+        emotions = Emotion.objects.filter(ElderlyName=searchName, Created__startswith=searchDate,
+                                          Type=searchType)
+        total = Emotion.objects.filter(ElderlyName=searchName, Created__startswith=searchDate,
+                                       Type=searchType).count()
+    elif searchName and not searchDate and not searchType:
         emotions = Emotion.objects.filter(ElderlyName=searchName)
         total = Emotion.objects.filter(ElderlyName=searchName).count()
+    elif not searchName and searchDate and not searchType:
+        emotions = Emotion.objects.filter(Created__startswith=searchDate)
+        total = Emotion.objects.filter(Created__startswith=searchDate).count()
+    elif not searchName and not searchDate and searchType:
+        emotions = Emotion.objects.filter(Type=searchType)
+        total = Emotion.objects.filter(Type=searchType).count()
+    elif not searchName and searchDate and searchType:
+        emotions = Emotion.objects.filter(Created__startswith=searchDate,
+                                          Type=searchType)
+        total = Emotion.objects.filter(Created__startswith=searchDate,
+                                       Type=searchType).count()
+    elif searchName and not not searchDate and searchType:
+        emotions = Emotion.objects.filter(ElderlyName=searchName,
+                                          Type=searchType)
+        total = Emotion.objects.filter(ElderlyName=searchName,
+                                       Type=searchType).count()
+    elif searchName and searchDate and not searchType:
+        emotions = Emotion.objects.filter(ElderlyName=searchName, Created__startswith=searchDate)
+        total = Emotion.objects.filter(ElderlyName=searchName, Created__startswith=searchDate).count()
     else:
         emotions = Emotion.objects.filter(Created__startswith=searchDate)
         total = Emotion.objects.filter(Created__startswith=searchDate).count()
@@ -385,6 +457,7 @@ def emotionList(request):
                 'ElderlyName': emotion.ElderlyName,
                 'Url': url,
                 'Created': emotion.Created,
+                'Type': emotion.Type,
             }
         )
 
@@ -416,6 +489,7 @@ def emotionDelete(request):
 
 def emotionDetailByID(request):
     ID = request.GET.get('ID')
+    # print(ID)
     result = Emotion.objects.filter(ID=ID).first()
     result1 = Elderly.objects.filter(UserName=result.ElderlyName).first()
     url = getImgUrl(result.ImgUrl)
@@ -428,6 +502,7 @@ def emotionDetailByID(request):
             'ElderlyName': result.ElderlyName,
             'Url': url,
             'Created': result.Created,
+            'Type': result.Type,
             'Sex': result1.Sex,
             'Age': result1.Age,
             'Birthday': result1.Birthday,
@@ -741,7 +816,6 @@ def gen_display5(url):
                                                 ImgUrl=oss_file_name)
                             reaction.save()
 
-
                 success1, frame1 = cv2.imencode('.jpeg', frame)
                 if success1:
                     # 转换为byte类型的，存储在迭代器中
@@ -769,9 +843,9 @@ def reactionList(request):
         total = Reaction.objects.count()
     elif searchDate and searchElderlyName and searchVolunteerName:
         reactions = Reaction.objects.filter(Created__startswith=searchDate, ElderlyName=searchElderlyName,
-                                          VolunteerName=searchVolunteerName)
+                                            VolunteerName=searchVolunteerName)
         total = Reaction.objects.filter(Created__startswith=searchDate, ElderlyName=searchElderlyName,
-                                       VolunteerName=searchVolunteerName).count()
+                                        VolunteerName=searchVolunteerName).count()
     elif searchDate and not searchElderlyName and not searchVolunteerName:
         reactions = Reaction.objects.filter(Created__startswith=searchDate)
         total = Reaction.objects.filter(Created__startswith=searchDate).count()
@@ -783,17 +857,17 @@ def reactionList(request):
         total = Reaction.objects.filter(VolunteerName=searchVolunteerName).count()
     elif not searchDate and searchElderlyName and searchVolunteerName:
         reactions = Reaction.objects.filter(ElderlyName=searchElderlyName,
-                                          VolunteerName=searchVolunteerName)
+                                            VolunteerName=searchVolunteerName)
         total = Reaction.objects.filter(ElderlyName=searchElderlyName,
-                                       VolunteerName=searchVolunteerName).count()
+                                        VolunteerName=searchVolunteerName).count()
     elif searchDate and not not searchElderlyName and searchVolunteerName:
         reactions = Reaction.objects.filter(Created__startswith=searchDate,
-                                          VolunteerName=searchVolunteerName)
+                                            VolunteerName=searchVolunteerName)
         total = Reaction.objects.filter(Created__startswith=searchDate,
-                                       VolunteerName=searchVolunteerName).count()
+                                        VolunteerName=searchVolunteerName).count()
     elif searchDate and searchElderlyName and not searchVolunteerName:
-        reactions = Reaction.objects.filter(Created__startswith=searchDate, ElderlyName=searchElderlyName,)
-        total = Reaction.objects.filter(Created__startswith=searchDate, ElderlyName=searchElderlyName,).count()
+        reactions = Reaction.objects.filter(Created__startswith=searchDate, ElderlyName=searchElderlyName, )
+        total = Reaction.objects.filter(Created__startswith=searchDate, ElderlyName=searchElderlyName, ).count()
     else:
         reactions = Reaction.objects.filter(Created__startswith=searchDate)
         total = Reaction.objects.filter(Created__startswith=searchDate).count()
@@ -839,10 +913,11 @@ def reactionDelete(request):
 
 def reactionDetailByID(request):
     ID = request.GET.get('ID')
-    print(ID)
+    # print(ID)
     result = Reaction.objects.filter(ID=ID).first()
-    print(result)
+    # print(result.ElderlyName)
     result1 = Elderly.objects.filter(UserName=result.ElderlyName).first()
+    # print(result1)
     result2 = Volunteer.objects.filter(UserName=result.VolunteerName).first()
     url = getImgUrl(result.ImgUrl)
     url1 = getImgUrl(result1.ImgUrl)
@@ -879,3 +954,295 @@ def reactionDetailByID(request):
             'VolunteerUpdated': result2.Updated
         }
     })
+
+
+# 设置语音提示
+
+def speak(text):
+    # 初始化语音引擎
+    engine = pyttsx3.init()
+    engine.say(text)
+    engine.runAndWait()
+    # engine.endLoop()
+    # with speak_lock:
+    #     engine.say(text)
+    #     engine.runAndWait()
+    engine.stop()
+
+
+# 在单独的线程中调用 speak 函数
+def threaded_speak(text):
+    print(f"Threaded speak: {text}")  # 调试信息
+    Thread(target=speak, args=(text,)).start()
+
+
+# 中文正常显示
+def draw_chinese_text(img, text, position, font_size=30, color=(0, 255, 0)):
+    # 将OpenCV的图像格式转换为PIL的图像格式
+    pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_img)
+    # 使用本地的中文字体
+    font = ImageFont.truetype("simhei.ttf", font_size, encoding="utf-8")
+    draw.text(position, text, font=font, fill=color)
+    # 将PIL的图像格式转换为OpenCV的图像格式
+    return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+
+# 检查人脸数量
+def check_faces(frame, faces):
+    if len(faces) == 0:
+        speak("没有检测到人脸")
+        frame = draw_chinese_text(frame, "没有检测到人脸", (10, 30))
+        # cv2.imshow("Collecting Faces", frame)
+        cv2.waitKey(1500)
+        return False
+    elif len(faces) > 1:
+        speak("发现多张人脸")
+        frame = draw_chinese_text(frame, "发现多张人脸", (10, 30))
+        # cv2.imshow("Collecting Faces", frame)
+        cv2.waitKey(1500)
+        return False
+    else:
+        speak("可以开始采集图像了")
+        frame = draw_chinese_text(frame, "可以开始采集图像了", (10, 30))
+        # cv2.imshow("Collecting Faces", frame)
+        cv2.waitKey(2000)
+        return True
+
+
+# 保存图片
+def save_images(frame, action, name, i):
+    # cv2.imshow("Collecting Faces", frame)
+    # cv2.waitKey(1)
+    if i % 20 == 0:
+        img_path = os.path.join(name, f"{action}_{name}_{i / 20 + 1}.jpg")
+        cv2.imwrite(img_path, frame)
+    # time.sleep(0.5)
+
+
+def gen_display6(url, UserName):
+    global facesNum
+    lastFaces = facesNum
+    predictor_path = PREDICTOR_PATH
+    # 初始化 Dlib 的人脸检测器和特征预测器
+    detector = dlib.get_frontal_face_detector()
+    predictor = dlib.shape_predictor(predictor_path)
+
+    if not os.path.exists(UserName):
+        os.makedirs(UserName)
+
+    camera = cv2.VideoCapture(url)
+    camera1 = cv2.VideoCapture(url)
+    actions = {
+        'blink': '请眨眼',
+        'open_mouth': '请张嘴',
+        'smile': '请笑一笑',
+        'rise_head': '请抬头',
+        'bow_head': '请低头',
+        'look_left': '请看左边',
+        'look_right': '请看右边'
+    }
+
+    while camera.isOpened():
+        ret, frame = camera.read()
+        # print(111111111111111111111111111)
+        if ret:
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = detector(gray)
+
+            if len(faces) == 0:
+                print(111111111111111111111111111)
+                print(lastFaces)
+                if lastFaces != len(faces):
+                    speak("没有检测到人脸")
+                    lastFaces = len(faces)
+                frame = draw_chinese_text(frame, "没有检测到人脸", (10, 30))
+                success1, frame1 = cv2.imencode('.jpeg', frame)
+                if success1:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + frame1.tobytes() + b'\r\n')
+                # cv2.imshow("Collecting Faces", frame)
+                # cv2.waitKey(1500)
+
+            elif len(faces) > 1:
+                print(222222222222222222222222222)
+                print(lastFaces)
+                if lastFaces != len(faces):
+                    speak("发现多张人脸")
+                    lastFaces = len(faces)
+                frame = draw_chinese_text(frame, "发现多张人脸", (10, 30))
+                success1, frame1 = cv2.imencode('.jpeg', frame)
+                if success1:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + frame1.tobytes() + b'\r\n')
+                # cv2.imshow("Collecting Faces", frame)
+                # cv2.waitKey(1500)
+            else:
+                print(3333333333333333333333333333)
+                print(lastFaces)
+                if lastFaces != len(faces):
+                    speak("可以开始采集图像了")
+                    lastFaces = len(faces)
+                frame = draw_chinese_text(frame, "可以开始采集图像了", (10, 30))
+
+                success1, frame1 = cv2.imencode('.jpeg', frame)
+                if success1:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + frame1.tobytes() + b'\r\n')
+
+                time.sleep(0.5)
+                # camera.release()
+
+                for action, action_name in actions.items():
+                    speak(f"1) {action_name}")
+                    for i in range(300):
+                        print(i)
+                        while camera1.isOpened():
+                            ret1, frame1 = camera1.read()
+                            # print(111111111111111111111111111)
+                            if ret1:
+                                frame1 = draw_chinese_text(frame1, action_name, (10, 30))
+                                save_images(frame1, action, UserName, i)
+                                success2, frame2 = cv2.imencode('.jpeg', frame1)
+                                if success2:
+                                    yield (b'--frame\r\n'
+                                           b'Content-Type: image/jpeg\r\n\r\n' + frame2.tobytes() + b'\r\n')
+                                break
+
+                speak("采集完毕")
+                break
+
+                # cv2.imshow("Collecting Faces", frame)
+                # cv2.waitKey(2000)
+
+
+def video6(request):
+    UserName = request.GET.get('UserName')
+    print(UserName)
+    url = 0
+    return StreamingHttpResponse(gen_display6(url, UserName), content_type='multipart/x-mixed-replace; boundary=frame')
+
+
+def getUrl6(request):
+    UserName = request.GET.get('UserName')
+    video_url = f'http://192.168.43.105:8080/video/video6?UserName={UserName}'
+    return JsonResponse({'code': 20000,
+                         'src': {'video1': video_url}})
+
+
+def gen_display7(url):
+    fire_count = 0
+    camera = cv2.VideoCapture(url)
+    while camera.isOpened():
+        ret, frame = camera.read()
+        # print(111111111111111111111111111)
+        if ret:
+            im = cv2.resize(frame, imgsz)  # 调整图像大小
+            im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)  # 转换颜色空间
+            im = torch.from_numpy(im).to(device)
+            im = im.half() if pt and device.type != 'cpu' else im.float()  # uint8 to fp16/32
+            im /= 255.0  # 归一化
+            if len(im.shape) == 3:
+                im = im.permute(2, 0, 1)  # 调整维度顺序
+                im = im.unsqueeze(0)  # 增加batch维度
+
+            # 推理
+            pred = model(im, augment=False, visualize=False)
+            pred = non_max_suppression(pred, 0.25, 0.45, None, False, max_det=1000)
+
+            # 处理检测结果
+            for i, det in enumerate(pred):  # 每张图像
+                im0 = frame.copy()
+                annotator = Annotator(im0, line_width=3, example=str(names))
+                if len(det):
+                    det[:, :4] = scale_coords1(im.shape[2:], det[:, :4], im0.shape).round()
+                    # 写入结果
+                    for *xyxy, conf, cls in reversed(det):
+                        label = f'{names[int(cls)]} {conf:.2f}'
+                        annotator.box_label(xyxy, label, color=colors(int(cls), True))
+                        isFire, pro = label.split(' ')
+                        if isFire == 'fire':
+                            fire_count += 1
+                            if fire_count == 0 or fire_count % 10 == 0:
+                                screenshot = frame.copy()
+                                # 获取当前时间
+                                getTime = time.strftime('%H:%M:%S', time.localtime())
+                                print(getTime)
+                                # 生成截图文件名
+                                filename = 'fire_{}.png'.format(getTime)
+                                # 将图像写入内存缓冲区
+                                is_success, buffer = cv2.imencode(".png", screenshot)
+                                io_buf = io.BytesIO(buffer)
+
+                                # 填写上传到 OSS 后的文件名
+                                oss_file_name = 'old-care/fire/{}'.format(filename)
+                                # 上传文件到 OSS
+                                bucket.put_object(oss_file_name, io_buf.getvalue())
+                                fire = Fire(ImgUrl=oss_file_name)
+                                fire.save()
+                                # send_sms("13855732038")
+                frame = annotator.result()
+
+            # Encode frame to JPEG
+            success1, frame1 = cv2.imencode('.jpeg', frame)
+            if success1:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame1.tobytes() + b'\r\n')
+
+
+def video7(request):
+    url = 0
+    return StreamingHttpResponse(gen_display7(url), content_type='multipart/x-mixed-replace; boundary=frame')
+
+
+def getUrl7(request):
+    video_url = f'http://192.168.43.105:8080/video/video7'
+    return JsonResponse({'code': 20000,
+                         'src': {'video1': video_url}})
+
+
+def fireList(request):
+    searchDate = request.GET.get('Date')
+
+    if not searchDate:
+        fires = Fire.objects.all()
+        total = Fire.objects.count()
+    else:
+        fires = Fire.objects.filter(Created__startswith=searchDate)
+        total = Fire.objects.filter(Created__startswith=searchDate).count()
+
+    fire_list = []
+    for fire in fires:
+        url = getImgUrl(fire.ImgUrl)
+        fire_list.append(
+            {
+                'ID': fire.ID,
+                'Url': url,
+                'Created': fire.Created,
+            }
+        )
+
+    return JsonResponse({'code': 20000,
+                         'message': 'success',
+                         'data': {'total': total,
+                                  'rows': fire_list}})
+
+
+def fireDelete(request):
+    token = request.META.get("HTTP_AUTHORIZATION")  # 获取 Authorization 头部
+    if token and token.startswith("Bearer "):
+        token = token.split(" ")[1]  # 提取实际的 token 部分
+    else:
+        return JsonResponse({'code': 20003, 'message': '无效的 token 或缺少 token'})
+    # print(token)
+    role = getRoleByToken(token)
+    if role == 'volunteer':
+        return JsonResponse({'code': 20003, 'message': '你没有权限'})
+
+    ID = request.GET.get('ID')
+    print(request.GET)
+    deleteFire = Fire.objects.get(ID=ID)
+    # print(deleteUser)
+    deleteFire.delete()
+    return JsonResponse({'code': 20000, 'message': '删除成功'})

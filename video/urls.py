@@ -36,5 +36,13 @@ urlpatterns = [
     path('reactionDelete', views.reactionDelete),
     path('reactionDetailByID', views.reactionDetailByID),
 
+    path('video6', views.video6),
+    path('getUrl6', views.getUrl6),
+
+    path('video7', views.video7),
+    path('getUrl7', views.getUrl7),
+
+    path('fireList', views.fireList),
+    path('fireDelete', views.fireDelete),
 
 ]

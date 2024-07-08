@@ -2,9 +2,6 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
-
-    # path('info', views.info),
-
     path('login', views.login),
     path('register', views.register),
     path('logout', views.logout),
@@ -28,6 +25,10 @@ urlpatterns = [
     path('elderlyUpdate', views.elderlyUpdate),
     path('elderlyDetailByID', views.elderlyDetailByID),
     path('uploadCloud', views.uploadCloud),
+
+    path('chat', views.chat),
+
+
 
     # path('list', views.userlist),
     # 删除user
