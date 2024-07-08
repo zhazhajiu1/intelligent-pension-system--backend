@@ -41,8 +41,8 @@ from video.sendMessage import send_sms
 pathlib.PosixPath = pathlib.WindowsPath
 
 # 填写您的Access Key ID和Access Key Secret
-access_key_id = 'LTAI5tR85Q78cGEzRpagmsjh'
-access_key_secret = 'JMIJbsWZP6sBPAkxEaQdONt52NSqBx'
+access_key_id = ''
+access_key_secret = ''
 # 填写您的Bucket所在地域
 endpoint = 'https://oss-cn-beijing.aliyuncs.com'
 # 填写Bucket名称
